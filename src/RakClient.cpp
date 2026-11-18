@@ -83,22 +83,14 @@ void RakClient::RunLoop() {
     // values. It also receives the treadsafe-function's registered callback, and
     // may choose to call it.
     auto callback = [this](Napi::Env env, Napi::Function jsCallback, void* datasPtr) {
-        std::vector<JSPacket*> batch;
-        packetMutex.lock();
-        batch.reserve(packet_queue.size());
-        while (!packet_queue.empty()) {
-            batch.push_back(packet_queue.front());
-            packet_queue.pop();
-        }
-        packetMutex.unlock();
-
+        auto batch = TakePackets(packet_queue, packetMutex);
         if (batch.empty()) return;
 
         Napi::Array packets = Napi::Array::New(env, batch.size());
         RakNet::SystemAddress systemAddress;
         RakNet::AddressOrGUID guid;
-        for (size_t i = 0; i < batch.size(); i++) {
-            JSPacket* data = batch[i];
+        for (uint32_t i = 0; !batch.empty(); i++, batch.pop()) {
+            JSPacket* data = batch.front();
             packets[i] = Napi::ArrayBuffer::New(env, data->data, data->length, FreeBuf, data);
             systemAddress = data->systemAddress;
             guid = data->guid;
@@ -126,16 +118,7 @@ void RakClient::RunLoop() {
             packetMutex.unlock();
             hasNewPackets = true;
         }
-        if (!context->running) {
-            packetMutex.lock();
-            while (!packet_queue.empty()) {
-                JSPacket* data = packet_queue.front();
-                packet_queue.pop();
-                FreeJSPacket(data);
-            }
-            packetMutex.unlock();
-            break;
-        }
+        if (!context->running) break;
         if (hasNewPackets) {
             auto status = context->tsfn.NonBlockingCall(&this->packet_queue, callback);
             if (status != napi_ok) {
@@ -144,13 +127,8 @@ void RakClient::RunLoop() {
         }
     }
 
-    packetMutex.lock();
-    while (!packet_queue.empty()) {
-        JSPacket* data = packet_queue.front();
-        packet_queue.pop();
-        FreeJSPacket(data);
-    }
-    packetMutex.unlock();
+    // The loop has ended, so packets still queued will never be delivered
+    DiscardPackets(packet_queue, packetMutex);
 
     // Release the thread-safe function. This decrements the internal thread
     // count, and will perform finalization since the count will reach 0.

@@ -62,20 +62,12 @@ void RakServer::RunLoop() {
     // values. It also receives the treadsafe-function's registered callback, and
     // may choose to call it.
     auto callback = [&](Napi::Env env, Napi::Function jsCallback, void* datasPtr) {
-        std::vector<JSPacket*> batch;
-        packetMutex.lock();
-        batch.reserve(packet_queue.size());
-        while (!packet_queue.empty()) {
-            batch.push_back(packet_queue.front());
-            packet_queue.pop();
-        }
-        packetMutex.unlock();
-
+        auto batch = TakePackets(packet_queue, packetMutex);
         if (batch.empty()) return;
 
         Napi::Array packets = Napi::Array::New(env, batch.size());
-        for (size_t i = 0; i < batch.size(); i++) {
-            JSPacket* data = batch[i];
+        for (uint32_t i = 0; !batch.empty(); i++, batch.pop()) {
+            JSPacket* data = batch.front();
             Napi::Array fields = Napi::Array::New(env, 3);
             int j = 0;
             fields[j++] = Napi::ArrayBuffer::New(env, data->data, data->length, &FreeBuf, data);
@@ -104,16 +96,7 @@ void RakServer::RunLoop() {
             packetMutex.unlock();
             hasNewPackets = true;
         }
-        if (!ctx->running) {
-            packetMutex.lock();
-            while (!packet_queue.empty()) {
-                JSPacket* data = packet_queue.front();
-                packet_queue.pop();
-                FreeJSPacket(data);
-            }
-            packetMutex.unlock();
-            break;
-        }
+        if (!ctx->running) break;
         if (hasNewPackets) {
             auto status = ctx->tsfn.NonBlockingCall(&this->packet_queue, callback);
             if (status != napi_ok) {
@@ -122,13 +105,8 @@ void RakServer::RunLoop() {
         }
     }
 
-    packetMutex.lock();
-    while (!packet_queue.empty()) {
-        JSPacket* data = packet_queue.front();
-        packet_queue.pop();
-        FreeJSPacket(data);
-    }
-    packetMutex.unlock();
+    // The loop has ended, so packets still queued will never be delivered
+    DiscardPackets(packet_queue, packetMutex);
 
     printf("server RELEASING\n");
     // Release the thread-safe function. This decrements the internal thread

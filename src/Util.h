@@ -2,6 +2,8 @@
 #include <ctype.h>
 #include <stdio.h>
 
+#include <mutex>
+#include <queue>
 #include <thread>
 
 #include "RakPeerInterface.h"
@@ -41,6 +43,20 @@ inline void FreeJSPacket(JSPacket* p) {
 }
 
 inline void FreeBuf(Napi::Env env, void* buf, JSPacket* hint) { FreeJSPacket((JSPacket*)hint); }
+
+// Moves every queued packet out of the shared queue, holding the lock only for the swap
+inline std::queue<JSPacket*> TakePackets(std::queue<JSPacket*>& queue, std::mutex& mutex) {
+    std::queue<JSPacket*> taken;
+    std::lock_guard<std::mutex> lock(mutex);
+    std::swap(taken, queue);
+    return taken;
+}
+
+// Frees queued packets that will never be handed to JS
+inline void DiscardPackets(std::queue<JSPacket*>& queue, std::mutex& mutex) {
+    auto pending = TakePackets(queue, mutex);
+    for (; !pending.empty(); pending.pop()) FreeJSPacket(pending.front());
+}
 
 // Hex tools
 
